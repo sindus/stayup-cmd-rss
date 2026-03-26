@@ -193,6 +193,8 @@ def fetch_latest_entry(feed_url: str) -> dict | None:
     feedparser.parse() never raises — it returns an empty feed on network errors.
     """
     feed = feedparser.parse(feed_url, agent="stayup-rss/1.0")
+    if feed.bozo and not feed.entries:
+        raise RuntimeError(f"Feed parse error: {feed.bozo_exception}")
     if not feed.entries:
         return None
 
