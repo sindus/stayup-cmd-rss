@@ -192,7 +192,7 @@ def fetch_latest_entry(feed_url: str) -> dict | None:
     Returns None if the feed has no entries.
     feedparser.parse() never raises — it returns an empty feed on network errors.
     """
-    feed = feedparser.parse(feed_url)
+    feed = feedparser.parse(feed_url, agent="stayup-rss/1.0")
     if not feed.entries:
         return None
 
