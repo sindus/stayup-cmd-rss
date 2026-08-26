@@ -44,6 +44,20 @@ CREATE TABLE IF NOT EXISTS log (
     error       TEXT NOT NULL,
     executed_at TIMESTAMPTZ NOT NULL
 );
+
+-- Registre partagé des providers : chaque collecteur y déclare son nom affiché au
+-- démarrage. L'API stayup-api lit cette table pour construire une UI dynamique ;
+-- elle ne connaît aucun nom de provider en dur, seulement les tables connector_*.
+CREATE TABLE IF NOT EXISTS provider_registry (
+    name          TEXT PRIMARY KEY,
+    display_name  TEXT NOT NULL,
+    sort_order    INTEGER NOT NULL DEFAULT 100,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO provider_registry (name, display_name, sort_order)
+VALUES ('rss', 'RSS', 30)
+ON CONFLICT (name) DO UPDATE SET display_name = EXCLUDED.display_name, updated_at = NOW();
 """
 
 

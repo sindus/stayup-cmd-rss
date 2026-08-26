@@ -34,6 +34,14 @@ class TestInitDb:
         assert cursor.execute.call_count == 1
         conn.commit.assert_called_once()
 
+    def test_ddl_registers_the_provider(self):
+        conn, cursor = make_conn_mock()
+        init_db(conn)
+        sql = cursor.execute.call_args[0][0]
+        assert "CREATE TABLE IF NOT EXISTS provider_registry" in sql
+        assert "INSERT INTO provider_registry" in sql
+        assert "'rss', 'RSS'" in sql
+
 
 class TestUpsertRepository:
     def test_returns_id(self):
