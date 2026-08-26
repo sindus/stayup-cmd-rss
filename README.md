@@ -3,6 +3,8 @@
 [![CI](https://github.com/stayup-app/stayup-cmd-rss/actions/workflows/ci.yml/badge.svg)](https://github.com/stayup-app/stayup-cmd-rss/actions/workflows/ci.yml)
 [![Daily RSS fetch](https://github.com/stayup-app/stayup-cmd-rss/actions/workflows/daily.yml/badge.svg)](https://github.com/stayup-app/stayup-cmd-rss/actions/workflows/daily.yml)
 
+**Website:** https://stayup-ui.vercel.app
+
 Monitors RSS feeds and stores the latest entry in a PostgreSQL database.
 
 For each tracked profile, the script fetches the most recent entry using feedparser. A new entry is only stored when the entry's GUID has changed since the last run. The three most recent entries per profile are kept.
