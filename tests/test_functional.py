@@ -13,6 +13,7 @@ import psycopg2
 import pytest
 
 from fetch_rss import (
+    DISPLAY_TEMPLATE,
     cleanup_old_entries,
     init_db,
     process_repository,
@@ -20,6 +21,24 @@ from fetch_rss import (
     save_error,
     upsert_repository,
 )
+
+
+class TestInitDb:
+    def test_registers_name_and_display_template(self, db_conn):
+        init_db(db_conn)
+        with db_conn.cursor() as cur:
+            cur.execute("SELECT display_name, sort_order, template FROM provider_registry WHERE name = 'rss'")
+            display_name, sort_order, template = cur.fetchone()
+        assert (display_name, sort_order) == ("RSS", 30)
+        assert template == DISPLAY_TEMPLATE  # psycopg2 decodes JSONB
+
+    def test_is_idempotent(self, db_conn):
+        init_db(db_conn)
+        init_db(db_conn)
+        with db_conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM provider_registry WHERE name = 'rss'")
+            assert cur.fetchone()[0] == 1
+
 
 # ---------------------------------------------------------------------------
 # Fixtures

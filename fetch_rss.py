@@ -45,19 +45,95 @@ CREATE TABLE IF NOT EXISTS log (
     executed_at TIMESTAMPTZ NOT NULL
 );
 
--- Registre partagé des providers : chaque collecteur y déclare son nom affiché au
--- démarrage. L'API stayup-api lit cette table pour construire une UI dynamique ;
--- elle ne connaît aucun nom de provider en dur, seulement les tables connector_*.
+-- Registre partagé des providers : chaque collecteur y déclare son nom affiché et
+-- son template d'affichage au démarrage. L'API stayup-api lit cette table pour
+-- construire une UI dynamique ; elle ne connaît aucun nom de provider en dur,
+-- seulement les tables connector_*. Le registre est renseigné juste après ce DDL
+-- (voir REGISTER_PROVIDER_SQL) — pas ici, pour passer le template en paramètre.
 CREATE TABLE IF NOT EXISTS provider_registry (
     name          TEXT PRIMARY KEY,
     display_name  TEXT NOT NULL,
     sort_order    INTEGER NOT NULL DEFAULT 100,
+    template      JSONB,
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-INSERT INTO provider_registry (name, display_name, sort_order)
-VALUES ('rss', 'RSS', 30)
-ON CONFLICT (name) DO UPDATE SET display_name = EXCLUDED.display_name, updated_at = NOW();
+-- Registre antérieur à la colonne `template` : on l'ajoute sans rien réécrire.
+ALTER TABLE provider_registry ADD COLUMN IF NOT EXISTS template JSONB;
+"""
+
+PROVIDER_TYPE = "rss"
+
+# Nom affiché du provider dans les apps (fallback : nom de table capitalisé).
+DISPLAY_NAME = "RSS"
+
+# Manifeste d'affichage : comment les 3 apps (ui / desktop / mobile) rendent les
+# lignes de ce connecteur, sans une ligne de code côté app. stayup-api le relaie
+# tel quel depuis provider_registry.template, sans jamais l'interpréter.
+# Schéma : voir stayup-api/docs/self-hosting-and-providers.md.
+#
+# Une ligne connector_rss = une entrée de flux. `content` est un JSON
+# {version, title, link, summary}, `summary` étant du HTML (mode "html").
+DISPLAY_TEMPLATE = {
+    "version": 1,
+    "display": {
+        "name": DISPLAY_NAME,
+        # Icône auto-descriptive (tracé SVG teintable). Ondes RSS + point.
+        "icon": {
+            "paths": [
+                "M4 11a9 9 0 0 1 9 9",
+                "M4 4a16 16 0 0 1 16 16",
+                "M6 19a1 1 0 0 1-2 0 1 1 0 0 1 2 0z",
+            ],
+            "viewBox": "0 0 24 24",
+            "stroke": True,
+        },
+        "accent": "#a8d4b5",
+        "sortOrder": 30,
+        "feedLabel": {"path": "$source.url", "format": "hostname"},
+    },
+    "item": {
+        "parseContentAsJson": True,
+        "fields": {
+            "title": "title",
+            "subtitle": {"path": "link", "format": "hostname"},
+            "summary": "summary",
+            "url": "link",
+            "timestamp": "$row.datetime",
+        },
+    },
+    "list": {
+        "layout": "row",
+        "primary": "title",
+        "secondary": "subtitle",
+        "meta": "timestamp",
+    },
+    "detail": {
+        "mode": "html",
+        "title": "title",
+        "subtitle": {"path": "link", "format": "hostname"},
+        "body": "summary",
+        "openUrl": "link",
+        "openLabel": "Read article",
+    },
+    "form": {
+        "label": "RSS/Atom feed URL",
+        "placeholder": "https://blog.example.com/feed.xml",
+        "pattern": r"^https?://.+",
+        "transform": {"trim": True},
+    },
+}
+
+# Upsert du registre, template passé en paramètre (le JSON contient des guillemets
+# et échapperait mal dans un DDL littéral). `sort_order` n'est pas réécrit sur
+# conflit, par cohérence avec les autres collecteurs stayup-cmd-*.
+REGISTER_PROVIDER_SQL = """
+INSERT INTO provider_registry (name, display_name, sort_order, template)
+VALUES (%s, %s, %s, %s::jsonb)
+ON CONFLICT (name) DO UPDATE SET
+    display_name = EXCLUDED.display_name,
+    template     = EXCLUDED.template,
+    updated_at   = NOW();
 """
 
 
@@ -85,9 +161,13 @@ def get_db_conn() -> psycopg2.extensions.connection:
 
 
 def init_db(conn: psycopg2.extensions.connection) -> None:
-    """Create tables if they don't exist."""
+    """Create tables if they don't exist and register the provider (name + display template)."""
     with conn.cursor() as cur:
         cur.execute(DDL)
+        cur.execute(
+            REGISTER_PROVIDER_SQL,
+            (PROVIDER_TYPE, DISPLAY_NAME, 30, json.dumps(DISPLAY_TEMPLATE)),
+        )
     conn.commit()
 
 
