@@ -8,11 +8,12 @@ from unittest.mock import MagicMock, patch
 from fetch_rss import (
     DISPLAY_TEMPLATE,
     cleanup_old_entries,
-    fetch_feed_entries,
+    fetch_feed,
     get_latest_entry,
     init_db,
     save_entry,
     save_error,
+    save_feed_title,
     upsert_repository,
 )
 
@@ -71,6 +72,12 @@ class TestDisplayTemplate:
         assert DISPLAY_TEMPLATE["detail"]["mode"] == "html"
         assert DISPLAY_TEMPLATE["detail"]["body"] == "summary"
         assert DISPLAY_TEMPLATE["item"]["parseContentAsJson"] is True
+
+    def test_feed_label_prefers_the_stored_channel_title_then_the_domain(self):
+        label = DISPLAY_TEMPLATE["display"]["feedLabel"]
+        assert isinstance(label, list)
+        assert label[0] == {"path": "$source.config.title"}
+        assert label[1] == {"path": "$source.url", "format": "domain"}
 
 
 class TestUpsertRepository:
@@ -155,6 +162,18 @@ class TestSaveError:
         assert params[0] is None
 
 
+class TestSaveFeedTitle:
+    def test_merges_the_title_into_config_and_commits(self):
+        conn, cursor = make_conn_mock()
+        save_feed_title(conn, 7, "Le blog de Stéphane Robert")
+        cursor.execute.assert_called_once()
+        conn.commit.assert_called_once()
+        sql = cursor.execute.call_args[0][0]
+        assert "UPDATE repository SET config = config ||" in sql
+        assert "jsonb_build_object('title'" in sql
+        assert cursor.execute.call_args[0][1] == ("Le blog de Stéphane Robert", 7)
+
+
 class TestCleanupOldEntries:
     def test_executes_delete_and_commits(self):
         conn, cursor = make_conn_mock()
@@ -172,7 +191,7 @@ class TestCleanupOldEntries:
 
 
 # ---------------------------------------------------------------------------
-# fetch_feed_entries
+# fetch_feed
 # ---------------------------------------------------------------------------
 
 
@@ -190,12 +209,20 @@ def _make_entry(id=None, title="T", link="https://example.com/1", summary="", pu
     return mock_entry
 
 
-class TestFetchFeedEntries:
+def _parsed(entries, channel_title=None, bozo=False, bozo_exception=None):
+    """Mock of a feedparser.parse() result, with a stubbed channel `feed`."""
+    channel = MagicMock()
+    channel.get.side_effect = lambda k, d=None: (channel_title if k == "title" else d)
+    return MagicMock(bozo=bozo, entries=entries, feed=channel, bozo_exception=bozo_exception)
+
+
+class TestFetchFeed:
     @patch("fetch_rss.feedparser.parse")
-    def test_returns_list_with_correct_keys(self, mock_parse):
+    def test_returns_channel_title_and_entries_with_correct_keys(self, mock_parse):
         entry = _make_entry(id="https://example.com/entry/1", title="Hello World", summary="A summary.")
-        mock_parse.return_value = MagicMock(bozo=False, entries=[entry])
-        result = fetch_feed_entries("https://example.com/feed.xml")
+        mock_parse.return_value = _parsed([entry], channel_title="  My Blog  ")
+        title, result = fetch_feed("https://example.com/feed.xml")
+        assert title == "My Blog"  # trimmed
         assert len(result) == 1
         assert result[0]["version"] == "https://example.com/entry/1"
         assert result[0]["title"] == "Hello World"
@@ -203,52 +230,57 @@ class TestFetchFeedEntries:
         assert result[0]["summary"] == "A summary."
 
     @patch("fetch_rss.feedparser.parse")
+    def test_title_is_none_when_the_feed_has_no_title(self, mock_parse):
+        mock_parse.return_value = _parsed([_make_entry(id="g1")], channel_title=None)
+        title, _ = fetch_feed("https://example.com/feed.xml")
+        assert title is None
+
+    @patch("fetch_rss.feedparser.parse")
     def test_returns_empty_list_when_no_entries(self, mock_parse):
-        mock_parse.return_value = MagicMock(bozo=False, entries=[])
-        result = fetch_feed_entries("https://example.com/feed.xml")
+        mock_parse.return_value = _parsed([])
+        _, result = fetch_feed("https://example.com/feed.xml")
         assert result == []
 
     @patch("fetch_rss.feedparser.parse")
     def test_limits_to_max_entries(self, mock_parse):
         entries = [_make_entry(id=f"guid-{i}") for i in range(10)]
-        mock_parse.return_value = MagicMock(bozo=False, entries=entries)
-        result = fetch_feed_entries("https://example.com/feed.xml", max_entries=3)
+        mock_parse.return_value = _parsed(entries)
+        _, result = fetch_feed("https://example.com/feed.xml", max_entries=3)
         assert len(result) == 3
 
     @patch("fetch_rss.feedparser.parse")
     def test_defaults_to_5_entries(self, mock_parse):
         entries = [_make_entry(id=f"guid-{i}") for i in range(10)]
-        mock_parse.return_value = MagicMock(bozo=False, entries=entries)
-        result = fetch_feed_entries("https://example.com/feed.xml")
+        mock_parse.return_value = _parsed(entries)
+        _, result = fetch_feed("https://example.com/feed.xml")
         assert len(result) == 5
 
     @patch("fetch_rss.feedparser.parse")
     def test_parses_published_date(self, mock_parse):
         published_parsed = time.struct_time((2024, 6, 15, 0, 0, 0, 5, 167, 0))
         entry = _make_entry(id="guid-1", published_parsed=published_parsed)
-        mock_parse.return_value = MagicMock(bozo=False, entries=[entry])
-        result = fetch_feed_entries("https://example.com/feed.xml")
+        mock_parse.return_value = _parsed([entry])
+        _, result = fetch_feed("https://example.com/feed.xml")
         assert result[0]["published"] == datetime(2024, 6, 15, 0, 0, 0, tzinfo=timezone.utc)
 
     @patch("fetch_rss.feedparser.parse")
     def test_handles_missing_id_falls_back_to_link(self, mock_parse):
         entry = _make_entry(id=None, link="https://example.com/fallback")
-        mock_parse.return_value = MagicMock(bozo=False, entries=[entry])
-        result = fetch_feed_entries("https://example.com/feed.xml")
+        mock_parse.return_value = _parsed([entry])
+        _, result = fetch_feed("https://example.com/feed.xml")
         assert result[0]["version"] == "https://example.com/fallback"
 
     @patch("fetch_rss.feedparser.parse")
     def test_published_none_when_missing(self, mock_parse):
         entry = _make_entry(id="guid-1", published_parsed=None)
-        mock_parse.return_value = MagicMock(bozo=False, entries=[entry])
-        result = fetch_feed_entries("https://example.com/feed.xml")
+        mock_parse.return_value = _parsed([entry])
+        _, result = fetch_feed("https://example.com/feed.xml")
         assert result[0]["published"] is None
 
     @patch("fetch_rss.feedparser.parse")
     def test_raises_on_bozo_with_no_entries(self, mock_parse):
-        mock_feed = MagicMock(bozo=True, entries=[], bozo_exception=Exception("bad xml"))
-        mock_parse.return_value = mock_feed
+        mock_parse.return_value = _parsed([], bozo=True, bozo_exception=Exception("bad xml"))
         import pytest
 
         with pytest.raises(RuntimeError, match="Feed parse error"):
-            fetch_feed_entries("https://example.com/feed.xml")
+            fetch_feed("https://example.com/feed.xml")

@@ -90,7 +90,12 @@ DISPLAY_TEMPLATE = {
         },
         "accent": "#a8d4b5",
         "sortOrder": 30,
-        "feedLabel": {"path": "$source.url", "format": "domain"},
+        # Libellé du flux : le titre du canal quand le collecteur l'a stocké
+        # (repository.config.title), sinon le domaine de l'URL.
+        "feedLabel": [
+            {"path": "$source.config.title"},
+            {"path": "$source.url", "format": "domain"},
+        ],
     },
     "item": {
         "parseContentAsJson": True,
@@ -262,6 +267,18 @@ def save_error(
     conn.commit()
 
 
+def save_feed_title(conn: psycopg2.extensions.connection, repository_id: int, title: str) -> None:
+    """Store the feed's channel <title> in repository.config so the apps can
+    label the flux with it. The display template falls back to the URL domain
+    when this key is absent."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE repository SET config = config || jsonb_build_object('title', %s::text) WHERE id = %s",
+            (title, repository_id),
+        )
+    conn.commit()
+
+
 def _parse_entry(raw_entry) -> dict:
     """Extract relevant fields from a feedparser entry."""
     version = raw_entry.get("id") or raw_entry.get("link")
@@ -283,19 +300,21 @@ def _parse_entry(raw_entry) -> dict:
     }
 
 
-def fetch_feed_entries(feed_url: str, max_entries: int = 5) -> list[dict]:
-    """Return metadata for the most recent entries of an RSS/Atom feed.
+def fetch_feed(feed_url: str, max_entries: int = 5) -> tuple[str | None, list[dict]]:
+    """Return the feed's channel title and its most recent entries.
 
-    Returns a list of dicts (newest first) with keys: version, title, link,
-    summary, published. Returns an empty list if the feed has no entries.
-    feedparser.parse() never raises — it returns an empty feed on network errors.
+    Entries are dicts (newest first) with keys: version, title, link, summary,
+    published — empty list when the feed has none. Title is ``None`` when the
+    feed carries no ``<title>``. feedparser.parse() never raises — it returns an
+    empty feed on network errors.
     """
     feed = feedparser.parse(feed_url, agent="stayup-rss/1.0")
     if feed.bozo and not feed.entries:
         status = getattr(feed, "status", "no status")
         href = getattr(feed, "href", feed_url)
         raise RuntimeError(f"Feed parse error (HTTP {status}, url={href}): {feed.bozo_exception}")
-    return [_parse_entry(e) for e in feed.entries[:max_entries]]
+    title = (feed.feed.get("title") or "").strip() or None
+    return title, [_parse_entry(e) for e in feed.entries[:max_entries]]
 
 
 # ---------------------------------------------------------------------------
@@ -315,9 +334,14 @@ def process_repository(
     """
     max_entries = config.get("max_entries", 5)
     try:
-        entries = fetch_feed_entries(repository_url, max_entries=max_entries)
+        feed_title, entries = fetch_feed(repository_url, max_entries=max_entries)
         if not entries:
             raise RuntimeError("No entry found.")
+
+        # Garde `repository.config.title` à jour pour le libellé du flux (le
+        # template retombe sur le domaine de l'URL quand il est absent).
+        if feed_title and feed_title != config.get("title"):
+            save_feed_title(conn, repository_id, feed_title)
 
         last_version = get_latest_entry(conn, repository_id)
 

@@ -218,13 +218,16 @@ class TestEndToEnd:
     def _make_feed_entry(self, version, title="Title", link="https://example.com/1", summary=""):
         return {"version": version, "title": title, "link": link, "summary": summary, "published": None}
 
-    @patch("fetch_rss.fetch_feed_entries")
+    @patch("fetch_rss.fetch_feed")
     def test_first_run_stores_only_latest(self, mock_fetch, db_conn):
         """First run — stores only the most recent article."""
-        mock_fetch.return_value = [
-            self._make_feed_entry("guid-001", title="Latest"),
-            self._make_feed_entry("guid-000", title="Older"),
-        ]
+        mock_fetch.return_value = (
+            None,
+            [
+                self._make_feed_entry("guid-001", title="Latest"),
+                self._make_feed_entry("guid-000", title="Older"),
+            ],
+        )
         repository_id = upsert_repository(db_conn, "https://example.com/feed.xml")
         process_repository(db_conn, repository_id, "https://example.com/feed.xml", datetime.now(tz=timezone.utc), {})
 
@@ -237,10 +240,10 @@ class TestEndToEnd:
         assert json.loads(rows[0][0])["version"] == "guid-001"
         assert json.loads(rows[0][0])["title"] == "Latest"
 
-    @patch("fetch_rss.fetch_feed_entries")
+    @patch("fetch_rss.fetch_feed")
     def test_no_insert_when_same_entry(self, mock_fetch, db_conn):
         """Same GUID — no new entry is inserted."""
-        mock_fetch.return_value = [self._make_feed_entry("guid-001")]
+        mock_fetch.return_value = (None, [self._make_feed_entry("guid-001")])
         repository_id = upsert_repository(db_conn, "https://example.com/feed.xml")
         process_repository(db_conn, repository_id, "https://example.com/feed.xml", datetime.now(tz=timezone.utc), {})
         process_repository(db_conn, repository_id, "https://example.com/feed.xml", datetime.now(tz=timezone.utc), {})
@@ -250,21 +253,24 @@ class TestEndToEnd:
             count = cur.fetchone()[0]
         assert count == 1
 
-    @patch("fetch_rss.fetch_feed_entries")
+    @patch("fetch_rss.fetch_feed")
     def test_stores_all_new_entries_until_known(self, mock_fetch, db_conn):
         """New GUIDs — all new entries up to the known one are stored."""
         repository_id = upsert_repository(db_conn, "https://example.com/feed.xml")
 
         # First run: store guid-001
-        mock_fetch.return_value = [self._make_feed_entry("guid-001", title="Entry 1")]
+        mock_fetch.return_value = (None, [self._make_feed_entry("guid-001", title="Entry 1")])
         process_repository(db_conn, repository_id, "https://example.com/feed.xml", datetime.now(tz=timezone.utc), {})
 
         # Second run: 2 new entries appeared (guid-003, guid-002), guid-001 is the known one
-        mock_fetch.return_value = [
-            self._make_feed_entry("guid-003", title="Entry 3"),
-            self._make_feed_entry("guid-002", title="Entry 2"),
-            self._make_feed_entry("guid-001", title="Entry 1"),
-        ]
+        mock_fetch.return_value = (
+            None,
+            [
+                self._make_feed_entry("guid-003", title="Entry 3"),
+                self._make_feed_entry("guid-002", title="Entry 2"),
+                self._make_feed_entry("guid-001", title="Entry 1"),
+            ],
+        )
         process_repository(db_conn, repository_id, "https://example.com/feed.xml", datetime.now(tz=timezone.utc), {})
 
         import json
@@ -277,17 +283,20 @@ class TestEndToEnd:
             versions = [json.loads(row[0])["version"] for row in cur.fetchall()]
         assert versions == ["guid-001", "guid-003", "guid-002"]
 
-    @patch("fetch_rss.fetch_feed_entries")
+    @patch("fetch_rss.fetch_feed")
     def test_stores_at_most_max_entries_when_no_match(self, mock_fetch, db_conn):
         """No match found — stores up to MAX_NEW_ENTRIES_PER_RUN entries."""
         repository_id = upsert_repository(db_conn, "https://example.com/feed.xml")
 
         # First run
-        mock_fetch.return_value = [self._make_feed_entry("guid-000")]
+        mock_fetch.return_value = (None, [self._make_feed_entry("guid-000")])
         process_repository(db_conn, repository_id, "https://example.com/feed.xml", datetime.now(tz=timezone.utc), {})
 
         # Second run: 5 completely new entries, old one not present
-        mock_fetch.return_value = [self._make_feed_entry(f"guid-{i:03d}", title=f"Entry {i}") for i in range(5, 0, -1)]
+        mock_fetch.return_value = (
+            None,
+            [self._make_feed_entry(f"guid-{i:03d}", title=f"Entry {i}") for i in range(5, 0, -1)],
+        )
         process_repository(db_conn, repository_id, "https://example.com/feed.xml", datetime.now(tz=timezone.utc), {})
 
         with db_conn.cursor() as cur:
@@ -296,7 +305,7 @@ class TestEndToEnd:
         # 1 (first run) + 5 (all new, no match found)
         assert count == 6
 
-    @patch("fetch_rss.fetch_feed_entries")
+    @patch("fetch_rss.fetch_feed")
     def test_logs_error_on_failure(self, mock_fetch, db_conn):
         """Exception — logged to the log table."""
         mock_fetch.side_effect = Exception("feedparser network error")
@@ -308,10 +317,10 @@ class TestEndToEnd:
             row = cur.fetchone()
         assert "feedparser network error" in row[0]
 
-    @patch("fetch_rss.fetch_feed_entries")
+    @patch("fetch_rss.fetch_feed")
     def test_logs_error_when_no_entry(self, mock_fetch, db_conn):
         """Empty feed — logged to the log table."""
-        mock_fetch.return_value = []
+        mock_fetch.return_value = (None, [])
         repository_id = upsert_repository(db_conn, "https://example.com/feed.xml")
         process_repository(db_conn, repository_id, "https://example.com/feed.xml", datetime.now(tz=timezone.utc), {})
 
@@ -319,3 +328,31 @@ class TestEndToEnd:
             cur.execute("SELECT error FROM log WHERE repository_id = %s", (repository_id,))
             row = cur.fetchone()
         assert row is not None
+
+    @patch("fetch_rss.fetch_feed")
+    def test_stores_the_feed_channel_title_in_config(self, mock_fetch, db_conn):
+        """The channel <title> lands in repository.config so the apps can use it
+        as the flux label (falls back to the URL domain when absent)."""
+        mock_fetch.return_value = ("Le blog de Stéphane Robert", [self._make_feed_entry("guid-1")])
+        repository_id = upsert_repository(db_conn, "https://example.com/feed.xml")
+        process_repository(db_conn, repository_id, "https://example.com/feed.xml", datetime.now(tz=timezone.utc), {})
+
+        with db_conn.cursor() as cur:
+            cur.execute("SELECT config->>'title' FROM repository WHERE id = %s", (repository_id,))
+            assert cur.fetchone()[0] == "Le blog de Stéphane Robert"
+
+    @patch("fetch_rss.fetch_feed")
+    def test_does_not_write_config_when_the_title_is_unchanged(self, mock_fetch, db_conn):
+        """No UPDATE when the incoming title already matches config['title']."""
+        mock_fetch.return_value = ("Same Title", [self._make_feed_entry("guid-1")])
+        repository_id = upsert_repository(db_conn, "https://example.com/feed.xml")
+        process_repository(
+            db_conn,
+            repository_id,
+            "https://example.com/feed.xml",
+            datetime.now(tz=timezone.utc),
+            {"title": "Same Title"},
+        )
+        with db_conn.cursor() as cur:
+            cur.execute("SELECT config FROM repository WHERE id = %s", (repository_id,))
+            assert cur.fetchone()[0] == {}  # left untouched
