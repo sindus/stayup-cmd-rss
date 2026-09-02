@@ -90,7 +90,7 @@ DISPLAY_TEMPLATE = {
         },
         "accent": "#a8d4b5",
         "sortOrder": 30,
-        "feedLabel": {"path": "$source.url", "format": "hostname"},
+        "feedLabel": {"path": "$source.url", "format": "domain"},
     },
     "item": {
         "parseContentAsJson": True,
