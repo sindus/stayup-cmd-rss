@@ -5,13 +5,15 @@
 
 **Website:** https://stayup-ui.vercel.app
 
-Monitors RSS feeds and stores the latest entry in a PostgreSQL database.
+Monitors RSS feeds and stores the latest entries via [stayup-api](https://github.com/stayup-app/stayup-api) — this script never touches a database directly, it only calls `stayup-api`'s `/connector-api/rss/*` endpoints.
 
-For each tracked profile, the script fetches the most recent entry using feedparser. A new entry is only stored when the entry's GUID has changed since the last run. The three most recent entries per profile are kept.
+For each tracked feed, the script fetches the most recent entries using feedparser. A new entry is only stored when its GUID has changed since the last run, up to `max_entries` (default 5) per run. Entries older than `retention_days` (default 15) are cleaned up each run.
 
 ## Requirements
 
-- [Docker](https://www.docker.com/) and Docker Compose
+- Python 3.13, or [Docker](https://www.docker.com/)
+- A `stayup-api` instance (the public one, or your own — see [self-hosting-and-providers.md](https://github.com/stayup-app/stayup-api/blob/main/docs/self-hosting-and-providers.md))
+- An API key for the `rss` provider, created from that instance's admin panel (Connector keys → New key, provider `rss`). The key is shown once — copy it right away.
 
 ## Setup
 
@@ -21,28 +23,11 @@ cd stayup-cmd-rss
 cp .env.example .env
 ```
 
-Open `.env` and configure your database connection.
+Open `.env` and set `STAYUP_API_URL` (your `stayup-api` instance) and `STAYUP_API_KEY` (the key you created for `rss`).
 
-### Option A — Local database (Docker)
-
-The default values in `.env` work out of the box with the bundled `db` service. No changes needed.
-
-### Option B — External database (Render, Railway, etc.)
-
-Set the full connection URL in `.env`:
-
-```env
-DATABASE_URL=postgresql://user:password@host:5432/dbname
-```
-
-> **Note:** Tables are created automatically on the first run.
+> **Note:** the provider registers itself automatically on every run — nothing to create by hand beyond the key.
 
 ## Usage
-
-**Start the database:**
-```bash
-docker compose up db -d
-```
 
 **Track an RSS feed:**
 ```bash
@@ -55,19 +40,17 @@ docker compose run --rm fetch_rss --add https://feeds.feedburner.com/example
 docker compose run --rm fetch_rss
 ```
 
-**Browse the database (pgAdmin):**
+Without Docker:
 ```bash
-docker compose up pgadmin -d
+pip install -r requirements.txt
+STAYUP_API_URL=... STAYUP_API_KEY=... python fetch_rss.py
 ```
-Open [http://localhost:5050](http://localhost:5050) — credentials: `admin@admin.com` / `admin`
-
-Connect to the server using host `db`, port `5432`, and the credentials from your `.env`.
 
 ## Automation
 
 The script runs automatically every night at midnight UTC via GitHub Actions.
 
-To enable it on your fork, add a `DATABASE_URL` secret in:
+To enable it on your fork, add `STAYUP_API_URL` and `STAYUP_API_KEY` secrets in:
 **Settings → Secrets and variables → Actions → New repository secret**
 
 You can also trigger the workflow manually from the **Actions → Daily RSS fetch → Run workflow** tab.
@@ -79,7 +62,7 @@ You can also trigger the workflow manually from the **Actions → Daily RSS fetc
 cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 ```
 
-**Run tests:**
+**Run tests** (no external dependencies — `stayup-api` and network calls are mocked):
 ```bash
 docker compose run --rm test
 ```
@@ -94,35 +77,19 @@ docker compose run --rm --entrypoint="" test sh -c "ruff check . && black --chec
 docker run --rm --entrypoint="" -v $(pwd):/app -w /app stayup-test black .
 ```
 
-## Database schema
+## What gets stored
 
-| Table | Description |
-|---|---|
-| `profile` | Tracked RSS feed URLs |
-| `connector_rss` | Stored entries (last 3 per profile) |
-| `log` | Errors encountered during retrieval |
-
-### `connector_rss` columns
-
-| Column | Description |
-|---|---|
-| `version` | Entry GUID, falls back to link if absent |
-| `content` | JSON: `{"title", "link", "summary"}` |
-| `diff` | Previous entry's content, null on first run |
-| `datetime` | Publication date from `entry.published_parsed` |
-| `executed_at` | Timestamp when the script ran |
-| `success` | Always `true` — errors are stored in the `log` table |
+Each stored entry is a JSON `content` blob `{"title", "link", "summary"}` (`summary` is HTML), keyed by GUID (`version`, falls back to the entry's link). The channel's `<title>` is kept in the tracked feed's config so the apps can label it — see `stayup-api`'s `connector-api` docs for the full contract.
 
 ## Project structure
 
 ```
 stayup-cmd-rss/
-├── fetch_rss.py            # Main script
+├── fetch_rss.py       # Main script
 ├── tests/
-│   ├── test_unit.py        # Unit tests (no external dependencies)
-│   └── test_functional.py  # Functional tests (require PostgreSQL)
-├── .env.example            # Configuration template
+│   └── test_unit.py   # Tests — stayup-api and network calls are mocked
+├── .env.example       # Configuration template
 ├── docker-compose.yml
 ├── Dockerfile
-└── pyproject.toml          # Ruff + Black configuration
+└── pyproject.toml     # Ruff + Black configuration
 ```
