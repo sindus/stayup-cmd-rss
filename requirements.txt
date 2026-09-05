@@ -1,2 +1,2 @@
 feedparser
-psycopg2-binary
+requests
